@@ -1,0 +1,930 @@
+-- Role for Customers
+CREATE ROLE customer_role NOINHERIT;
+-- Role for Admins
+CREATE ROLE admin_role NOINHERIT;
+-- Role for Delivery Personnel
+CREATE ROLE delivery_role NOINHERIT;
+--Role for Restaurant Admin--
+CREATE ROLE restaurant_admin_role NOINHERIT;
+
+set role postgres;
+
+--security--
+alter table menuitems enable row level security;
+
+create policy rest_all_policy
+on menuitems
+for all to restaurant_admin_role
+using (restaurantid = current_setting('app.restaurantid')::INT);
+
+CREATE POLICY customer_menuitems_policy
+ON menuitems
+FOR SELECT TO customer_role
+USING (true);
+
+
+DROP POLICY IF EXISTS rest_upd_del_policy ON menuitems;
+DROP POLICY IF EXISTS rest_del_policy ON menuitems;
+DROP POLICY IF EXISTS rest_all_policy ON menuitems;
+
+
+-- Grant privileges
+GRANT SELECT, INSERT ON Users, Orders, Payments, Reviews TO customer_role;
+GRANT SELECT ON Restaurants, MenuItems, RestaurantMenus TO customer_role;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON menuitems to restaurant_admin_role;
+REVOKE SELECT, INSERT, UPDATE, DELETE ON menuitems from restaurant_admin_role;
+
+GRANT SELECT ON Delivery TO delivery_role;
+GRANT SELECT ON Users TO delivery_role;
+GRANT SELECT ON DeliveryPerson TO delivery_role;
+
+grant select on users to delivery_role;
+
+-- Grant EXECUTE on specific functions
+GRANT EXECUTE ON FUNCTION GetRestaurantMenu(TEXT) TO customer_role;
+GRANT EXECUTE ON FUNCTION RecordPayment(INT, INT, NUMERIC, TEXT, TEXT, TEXT) TO customer_role;
+GRANT EXECUTE ON FUNCTION GetRestaurantsByCuisine(TEXT) TO customer_role;
+GRANT EXECUTE ON FUNCTION PlaceOrder(INT,INT,INT, JSON,VARCHAR,VARCHAR) TO customer_role;
+
+GRANT EXECUTE ON PROCEDURE AssignDeliveryPerson(INT) TO restaurant_admin_role;
+
+GRANT EXECUTE ON FUNCTION GetDeliveryStatus to delivery_role;
+
+-- Full access to all base tables
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO admin_role;
+
+-- Execute all functions
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO admin_role;  --execute once more
+
+
+-- Allow reading their deliveries and status updates
+GRANT SELECT, UPDATE ON Delivery TO delivery_role;
+GRANT SELECT ON Orders TO delivery_role;
+
+-- Allow function execution
+GRANT EXECUTE ON FUNCTION GetDeliveryStatus(INT) TO delivery_role;
+
+
+CREATE OR REPLACE VIEW RestaurantMenus AS
+SELECT 
+    r.Name AS RestaurantName,
+    m.Name AS ItemName,
+    m.Price,
+    m.Category,
+    m.Availability
+FROM 
+    Restaurants r
+JOIN 
+    MenuItems m ON r.RestaurantID = m.RestaurantID;
+
+CREATE OR REPLACE VIEW CustomerOrders AS
+SELECT 
+    o.OrderID,
+    u.Name AS CustomerName,
+    r.Name AS RestaurantName,
+    o.OrderDate,
+    o.TotalAmount,
+    o.Status
+FROM 
+    Orders o
+JOIN 
+    Users u ON o.UserID = u.UserID
+JOIN 
+    Restaurants r ON o.RestaurantID = r.RestaurantID;
+
+
+CREATE OR REPLACE VIEW DeliveryStatusView AS
+SELECT 
+    d.OrderID,
+    u.Name AS CustomerName,
+    dp.Name AS DeliveryPerson,
+    dp.VehicleType,
+    d.EstimatedTime,
+    d.Status
+FROM 
+    Delivery d
+JOIN 
+    Orders o ON d.OrderID = o.OrderID
+JOIN 
+    Users u ON o.UserID = u.UserID
+JOIN 
+    DeliveryPerson dp ON d.DeliveryPersonID = dp.DeliveryPersonID;
+
+CREATE or replace VIEW PendingDeliveries AS
+SELECT
+    d.DeliveryID,
+    d.OrderID,
+    o.Status AS OrderStatus,
+    d.EstimatedTime,
+    d.Status AS DeliveryStatus
+FROM Delivery d
+JOIN Orders o ON d.OrderID = o.OrderID
+WHERE d.Status != 'Completed';
+
+CREATE or replace VIEW UserOrderSummary AS
+SELECT
+    u.Name AS UserName,
+    o.OrderID,
+    o.OrderDate,
+    o.TotalAmount,
+    o.Status,
+    r.Name AS RestaurantName
+FROM Orders o
+JOIN Users u ON o.UserID = u.UserID
+JOIN Restaurants r ON o.RestaurantID = r.RestaurantID;
+
+
+CREATE OR REPLACE FUNCTION GetRestaurantMenu(restaurant_name TEXT)
+RETURNS TABLE (
+    ItemName VARCHAR(100),
+    Price NUMERIC,
+    Category VARCHAR(50),
+    Availability BOOLEAN
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        m.Name, m.Price, m.Category, m.Availability
+    FROM 
+        MenuItems m
+    JOIN 
+        Restaurants r ON m.RestaurantID = r.RestaurantID
+    WHERE 
+        r.Name = restaurant_name;
+END; $$;
+
+DROP FUNCTION getrestaurantmenu(text)
+
+CREATE OR REPLACE PROCEDURE RecordPayment(
+    p_order_id INT,
+    p_user_id INT,
+    p_amount NUMERIC,
+    p_method TEXT,
+    p_status TEXT,
+    p_transaction_id TEXT
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    -- Prevent duplicate payment with same order, user, and transaction ID
+    IF EXISTS (
+        SELECT 1 FROM Payments
+        WHERE OrderID = p_order_id AND UserID = p_user_id AND TransactionID = p_transaction_id
+    ) THEN
+        RAISE EXCEPTION 'Payment already recorded for OrderID %, UserID %, TransactionID %.',
+            p_order_id, p_user_id, p_transaction_id;
+    END IF;
+
+    -- Insert payment
+    INSERT INTO Payments (OrderID, UserID, Amount, PaymentMethod, Status, TransactionID, Timestamp)
+    VALUES (p_order_id, p_user_id, p_amount, p_method, p_status, p_transaction_id, NOW());
+END;
+$$;
+
+
+
+drop procedure Recordpayment
+
+CREATE OR REPLACE FUNCTION GetDeliveryStatus(p_order_id INT)
+RETURNS TABLE (
+    OrderID INT,
+    DeliveryStatus VARCHAR(20),
+    EstimatedTime TIMESTAMP,
+    DeliveryPerson VARCHAR(100)
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        d.OrderID,
+        d.Status,
+        d.EstimatedTime,
+        DeliveryPerson.Name
+    FROM Delivery d, DeliveryPerson, Users u
+    WHERE d.OrderID = p_order_id and d.DeliveryPersonID = u.UserID 
+	and DeliveryPerson.deliverypersonid = d.deliverypersonid;
+END;
+$$;
+
+DROP FUNCTION getdeliverystatus(integer)
+
+
+CREATE OR REPLACE FUNCTION GetRestaurantsByCuisine(cuisine TEXT)
+RETURNS TABLE (
+    RestaurantName TEXT,s
+    Location TEXT,
+    Rating NUMERIC
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT DISTINCT r.Name, r.Location, r.Rating
+    FROM Restaurants r
+    JOIN MenuItems m ON r.RestaurantID = m.RestaurantID
+    WHERE m.Category ILIKE cuisine;
+END; $$;
+
+drop function GetRestaurantsByCuisine;
+
+
+CREATE OR REPLACE PROCEDURE AddMenuItem(
+    rest_id INT,
+    item_name TEXT,
+    price NUMERIC,
+    category TEXT,
+    availability BOOLEAN
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    -- Prevent duplicate item names for the same restaurant
+    IF EXISTS (
+        SELECT 1 FROM MenuItems 
+        WHERE RestaurantID = rest_id AND Name ILIKE item_name
+    ) THEN
+        RAISE EXCEPTION 'Item "%" already exists for this restaurant.', item_name;
+    END IF;
+
+    -- Insert the new item
+    INSERT INTO MenuItems (RestaurantID, Name, Price, Category, Availability)
+    VALUES (rest_id, item_name, price, category, availability);
+END;
+$$;
+
+drop procedure addmenuitem
+
+
+
+
+-- Function
+CREATE OR REPLACE FUNCTION UpdateOrderTotal()
+RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE Orders
+    SET TotalAmount = (
+        SELECT SUM(Subtotal)
+        FROM OrderDetails
+        WHERE OrderID = NEW.OrderID
+    )
+    WHERE OrderID = NEW.OrderID;
+    
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+-- Trigger
+CREATE OR REPLACE TRIGGER trg_update_order_total
+AFTER INSERT OR UPDATE OR DELETE ON OrderDetails
+FOR EACH ROW
+EXECUTE FUNCTION UpdateOrderTotal();
+
+
+
+-- Function
+CREATE OR REPLACE FUNCTION PreventUnavailableItems()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM MenuItems 
+        WHERE ItemID = NEW.ItemID AND Availability = FALSE
+    ) THEN
+        RAISE EXCEPTION 'Item is not available for ordering.';
+    END IF;
+    
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+-- Trigger
+CREATE TRIGGER trg_prevent_unavailable_items
+BEFORE INSERT ON OrderDetails
+FOR EACH ROW
+EXECUTE FUNCTION PreventUnavailableItems();
+
+
+
+-- Function
+CREATE OR REPLACE FUNCTION SetDefaultReviewDate()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.Date IS NULL THEN
+        NEW.Date := NOW();
+    END IF;
+    
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+-- Trigger
+CREATE TRIGGER trg_set_review_date
+BEFORE INSERT ON Reviews
+FOR EACH ROW
+EXECUTE FUNCTION SetDefaultReviewDate();
+
+
+-- Function
+CREATE OR REPLACE FUNCTION SyncDeliveryWithOrder()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.Status = 'Delivered' THEN
+        UPDATE Delivery
+        SET Status = 'Completed'
+        WHERE OrderID = NEW.OrderID;
+    END IF;
+    
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+-- Trigger
+CREATE TRIGGER trg_sync_delivery_status
+AFTER UPDATE ON Orders
+FOR EACH ROW
+WHEN (NEW.Status = 'Delivered')
+EXECUTE FUNCTION SyncDeliveryWithOrder();
+
+
+CREATE INDEX idx_menuitems_category ON MenuItems(Category);
+
+CREATE INDEX idx_restaurants_name ON Restaurants(Name);
+
+CREATE INDEX idx_orders_status ON Orders(Status);
+
+CREATE INDEX idx_delivery_person ON Delivery(DeliveryPersonID);
+
+
+TRUNCATE TABLE 
+  OrderDetails,
+  Payments,
+  Delivery,
+  Orders,
+  Reviews,
+  MenuItems,
+  Addresses,
+  Users,
+  Restaurants,
+  DeliveryPerson,
+  UserType
+RESTART IDENTITY CASCADE;
+
+-- 1. UserType
+INSERT INTO UserType (TypeID, TypeName) VALUES
+(1, 'Customer'),
+(2, 'Admin'),
+(3, 'DeliveryPerson');
+
+-- 2. Users (Including DeliveryPersons)
+INSERT INTO Users (Name, Email, Phone, TypeID) VALUES
+-- Customers
+('Ravi Kumar', 'ravi@example.com', '9876543210', 1),
+('Anita Sharma', 'anita@example.com', '9123456789', 1),
+('Mohammed Ali', 'ali@example.com', '9988776655', 1),
+('Sneha Reddy', 'sneha@example.com', '9112233445', 1),
+('Amit Joshi', 'amit@example.com', '9001122334', 1),
+('Pooja Nair', 'pooja@example.com', '8899001122', 1),
+('Ravi Patel', 'ravi.patel@example.com', '9988776654', 1),
+('Sanjay Verma', 'sanjay.verma@example.com', '9876543217', 1),
+('Neha Gupta', 'neha.gupta@example.com', '9966332200', 1),
+('Rajesh Singh', 'rajesh.singh@example.com', '9955221100', 1),
+('Simran Kaur', 'simran.kaur@example.com', '9845223300', 1),
+
+-- Admins
+('Admin One', 'admin@example.com', '9999999999', 2),
+('Admin Two', 'admin2@example.com', '9998887777', 2),
+
+-- Delivery Persons (New Entries)
+('Rajeev Yadav', 'rajeev@delivery.com', '8881234567', 3),
+('Kiran Mehta', 'kiran@delivery.com', '7779876543', 3),
+('Sonal Bhatia', 'sonal@delivery.com', '7765432109', 3),
+('Deepak Verma', 'deepak@delivery.com', '7654321987', 3),
+('Vijay Mehta', 'vijay@delivery.com', '7755443322', 3),
+('Sandeep Roy', 'sandeep@delivery.com', '7744332211', 3);
+
+-- 3. DeliveryPerson (Now Populated)
+INSERT INTO DeliveryPerson (DeliveryPersonID, Name, Phone, VehicleType) VALUES
+(1, 'Rajeev Yadav', '8881234567', 'Bike'),
+(2, 'Kiran Mehta', '7779876543', 'Car'),
+(3, 'Sonal Bhatia', '7765432109', 'Bike'),
+(4, 'Deepak Verma', '7654321987', 'Car'),
+(5, 'Vijay Mehta', '7755443322', 'Scooter'),
+(6, 'Sandeep Roy', '7744332211', 'Scooter');
+
+-- 4. Addresses
+INSERT INTO Addresses (UserID, Address, City, ZipCode) VALUES
+(1, 'MG Road', 'Mumbai', '400001'),
+(2, 'BTM Layout', 'Bangalore', '560076'),
+(3, 'Juhu Beach Road', 'Mumbai', '400049'),
+(4, 'Koramangala', 'Bangalore', '560034'),
+(5, 'Rajajinagar', 'Bangalore', '560010'),
+(6, 'Sector 15', 'Noida', '201301'),
+(7, 'MG Road', 'Chennai', '600001'),
+(8, 'Churchgate', 'Mumbai', '400020'),
+(9, 'Alambagh', 'Lucknow', '226005'),
+(10, 'Indira Nagar', 'Lucknow', '226016');
+
+-- 5. Restaurants
+INSERT INTO Restaurants (RestaurantID, Name, Location, Contact, Rating) VALUES
+(1, 'Spicy Treat', 'Delhi', '9999988888', 4.5),
+(2, 'Tandoori Nights', 'Mumbai', '9999977777', 4.2),
+(3, 'South Masala', 'Chennai', '9999966666', 4.6),
+(4, 'Mamma Mia', 'Kolkata', '8888777777', 4.8),
+(5, 'The Royal Feast', 'Pune', '7777666666', 4.4),
+(6, 'Ocean Grill', 'Goa', '6666555555', 4.7),
+(7, 'Pasta Bella', 'Hyderabad', '5555444444', 4.2),
+(8, 'Cafe Delight', 'Kochi', '4444333333', 4.3);
+
+-- 6. MenuItems
+INSERT INTO MenuItems (RestaurantID, Name, Price, Category, Availability) VALUES
+(1, 'Paneer Butter Masala', 220, 'North Indian', TRUE),
+(1, 'Garlic Naan', 40, 'North Indian', TRUE),
+(2, 'Chicken Biryani', 250, 'Mughlai', TRUE),
+(2, 'Roti', 20, 'Indian', TRUE),
+(3, 'Dosa', 80, 'South Indian', TRUE),
+(3, 'Sambar Rice', 90, 'South Indian', TRUE),
+(1, 'Chole Bhature', 120, 'North Indian', TRUE),
+(2, 'Butter Chicken', 270, 'Mughlai', TRUE),
+(3, 'Rasam', 60, 'South Indian', TRUE),
+(4, 'Margherita Pizza', 350, 'Italian', TRUE),
+(4, 'Penne Arrabbiata', 220, 'Italian', TRUE),
+(5, 'Butter Garlic Lobster', 550, 'Seafood', TRUE),
+(5, 'Chicken Tikka Masala', 280, 'Indian', TRUE),
+(6, 'Goan Fish Curry', 350, 'Seafood', TRUE),
+(6, 'Prawn Masala', 400, 'Seafood', TRUE),
+(7, 'Vegetable Lasagna', 280, 'Italian', TRUE),
+(7, 'Spaghetti Bolognese', 300, 'Italian', TRUE),
+(8, 'Chicken Caesar Salad', 220, 'Salad', TRUE),
+(8, 'Veg Sandwich', 150, 'Snack', TRUE);
+
+-- 7. Orders
+INSERT INTO Orders (OrderID, UserID, RestaurantID, OrderDate, Status, TotalAmount, AddressID) VALUES
+(1, 1, 1, '2025-04-22', 'Preparing', 300, 1),
+(2, 2, 2, '2025-04-22', 'Delivered', 290, 2),
+(3, 3, 4, '2025-04-23', 'Delivered', 570, 3),
+(4, 4, 5, '2025-04-23', 'Delivered', 480, 4),
+(5, 5, 6, '2025-04-23', 'Preparing', 700, 5),
+(6, 6, 7, '2025-04-23', 'Preparing', 580, 6),
+(7, 7, 8, '2025-04-23', 'Delivered', 370, 7);
+
+-- 8. OrderDetails
+INSERT INTO OrderDetails (OrderDetailID, OrderID, ItemID, Quantity, Subtotal) VALUES
+(1, 1, 1, 1, 220),
+(2, 1, 2, 2, 80),
+(3, 2, 3, 1, 250),
+(4, 2, 4, 2, 40),
+(5, 3, 5, 1, 350),
+(6, 3, 6, 1, 220),
+(7, 4, 7, 1, 280),
+(8, 4, 8, 1, 200),
+(9, 5, 9, 2, 700),
+(10, 6, 10, 3, 450),
+(11, 7, 11, 1, 220),
+(12, 7, 12, 1, 150);
+
+-- 9. Payments
+INSERT INTO Payments (PaymentID, OrderID, UserID, Amount, PaymentMethod, Status, TransactionID, Timestamp) VALUES
+(1, 1, 1, 300, 'UPI', 'Success', 'TXN12345', '2025-04-22 10:30:00'),
+(2, 2, 2, 290, 'Card', 'Success', 'TXN12346', '2025-04-22 11:00:00'),
+(3, 3, 3, 570, 'Cash', 'Success', 'TXN12347', '2025-04-23 13:00:00'),
+(4, 4, 4, 480, 'UPI', 'Success', 'TXN12348', '2025-04-23 13:30:00'),
+(5, 5, 5, 700, 'Card', 'Pending', 'TXN12349', '2025-04-23 14:00:00'),
+(6, 6, 6, 580, 'UPI', 'Success', 'TXN12350', '2025-04-23 14:30:00'),
+(7, 7, 7, 370, 'Cash', 'Success', 'TXN12351', '2025-04-23 15:00:00');
+
+-- 10. Delivery (Updated DeliveryPersonID values)
+INSERT INTO Delivery (DeliveryID, OrderID, DeliveryPersonID, EstimatedTime, Status, DeliveryFee) VALUES
+(1, 1, 1, '2025-04-22 11:15:00', 'On the Way', 30),
+(2, 2, 2, '2025-04-22 10:45:00', 'Delivered', 25),
+(3, 3, 3, '2025-04-23 14:15:00', 'On the Way', 35),
+(4, 4, 4, '2025-04-23 14:45:00', 'Delivered', 40),
+(5, 5, 5, '2025-04-23 15:00:00', 'Assigned', 30),
+(6, 6, 6, '2025-04-23 15:30:00', 'On the Way', 25),
+(7, 7, 6, '2025-04-23 16:00:00', 'Delivered', 20); -- Replaced DeliveryPersonID=7 with 6
+
+
+-- 11. Review
+INSERT INTO Reviews (ReviewID, UserID, RestaurantID, Rating, Comment, Date, Reply) VALUES
+(1, 1, 1, 5, 'Delicious food!', '2025-04-22', 'Thank you!'),
+(2, 2, 2, 4, 'Nice taste, will order again.', '2025-04-22', 'Glad you liked it!'),
+(3, 3, 4, 5, 'Amazing pizza! Loved the crust.', '2025-04-23', 'Thanks for the feedback!'),
+(4, 4, 5, 4, 'Delicious but a bit too spicy.', '2025-04-23', 'Glad you enjoyed!'),
+(5, 5, 6, 5, 'Seafood was fresh and tasty.', '2025-04-23', 'Thank you for your review!'),
+(6, 6, 7, 4, 'Good but can improve the taste.', '2025-04-23', 'We are working on it!'),
+(7, 7, 8, 5, 'Best sandwich I had in a while.', '2025-04-23', 'Thank you!');
+
+
+SELECT * FROM RestaurantMenus;
+
+SELECT * FROM CustomerOrders;
+
+SELECT * FROM DeliveryStatusView;
+
+SELECT * FROM PendingDeliveries;
+
+SELECT * FROM UserOrderSummary;
+
+
+
+SELECT * FROM GetRestaurantMenu('South Masala');
+
+SELECT * FROM GetRestaurantsByCuisine('Italian');
+
+call AddMenuItem(1, 'Cheese Pasta', 12.99, 'Italian', False);
+
+SELECT * FROM Getdeliverystatus(6);
+
+SELECT * FROM GetRestaurantMenu('Tandoori Nights');
+
+call AddMenuItem(1, 'Paneer 65', 220.00, 'Indian', False);
+
+SELECT * FROM GetDeliveryStatus(5);
+
+SELECT * FROM RestaurantMenus WHERE RestaurantName = 'Spicy Treat';
+
+ALTER TABLE Payments 
+DROP COLUMN PaymentID;
+
+ALTER TABLE Payments 
+ADD COLUMN PaymentID SERIAL PRIMARY KEY;
+
+select * from payments;
+
+call RecordPayment(2, 4, 450.00, 'UPI', 'Success', 'TXN839283');
+
+
+select * from orders
+
+
+-- 1. CART TABLE
+CREATE TABLE IF NOT EXISTS Cart (
+    UserID INT REFERENCES Users(UserID),
+    ItemID INT REFERENCES MenuItems(ItemID),
+    Quantity INT CHECK (Quantity > 0),
+    PRIMARY KEY (UserID, ItemID)
+);
+
+-- 2. USER CART VIEW
+CREATE OR REPLACE VIEW UserCartView AS
+SELECT 
+    c.UserID,
+    u.Name AS UserName,
+    r.Name AS RestaurantName,
+    m.ItemID,
+    m.Name AS ItemName,
+    m.Price,
+    c.Quantity,
+    (m.Price * c.Quantity) AS TotalPrice
+FROM Cart c
+JOIN Users u ON c.UserID = u.UserID
+JOIN MenuItems m ON c.ItemID = m.ItemID
+JOIN Restaurants r ON m.RestaurantID = r.RestaurantID;
+
+-- 3. ADD TO CART PROCEDURE
+CREATE OR REPLACE PROCEDURE AddToCart(
+    p_user_id INT,
+    p_item_id INT,
+    p_quantity INT
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM Cart 
+        WHERE UserID = p_user_id AND ItemID = p_item_id
+    ) THEN
+        UPDATE Cart
+        SET Quantity = Quantity + p_quantity
+        WHERE UserID = p_user_id AND ItemID = p_item_id;
+    ELSE
+        INSERT INTO Cart (UserID, ItemID, Quantity)
+        VALUES (p_user_id, p_item_id, p_quantity);
+    END IF;
+END;
+$$;
+
+-- 4. UPDATE CART ITEM QUANTITY
+CREATE OR REPLACE PROCEDURE UpdateCartItemQuantity(
+    p_user_id INT,
+    p_item_id INT,
+    p_new_quantity INT
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF p_new_quantity <= 0 THEN
+        DELETE FROM Cart
+        WHERE UserID = p_user_id AND ItemID = p_item_id;
+    ELSE
+        UPDATE Cart
+        SET Quantity = p_new_quantity
+        WHERE UserID = p_user_id AND ItemID = p_item_id;
+    END IF;
+END;
+$$;
+
+-- 5. REMOVE FROM CART
+CREATE OR REPLACE PROCEDURE RemoveFromCart(
+    p_user_id INT,
+    p_item_id INT
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM Cart
+    WHERE UserID = p_user_id AND ItemID = p_item_id;
+END;
+$$;
+
+
+select * from orderdetails
+
+-- TEST FOR TRIGGER 1 Insert a new order detail into the OrderDetails table
+INSERT INTO OrderDetails (OrderDetailID, OrderID, ItemID, Quantity, Subtotal)
+VALUES (14, 1, 2, 2, 450.00);  -- This will update the total amount in the Orders table for OrderID = 1
+
+-- Check the updated total amount for the order
+SELECT * FROM Orders WHERE OrderID = 1;
+
+-- TEST FOR TRIGGER 2 Insert a new order detail into the OrderDetails table
+INSERT INTO OrderDetails (OrderDetailID, OrderID, ItemID, Quantity, Subtotal)
+VALUES (15, 7, 22, 2, 25.98);
+
+
+select * from menuitems
+
+-- Insert a review without specifying a date
+INSERT INTO Reviews (ReviewID, UserID, RestaurantID, Rating, Comment)
+VALUES (1, 1, 1, 5, 'Excellent food, highly recommended!');
+
+-- Verify that the Date field is automatically set to the current timestamp
+SELECT * FROM Reviews WHERE ReviewID = 1;
+
+
+select * from reviews
+
+
+
+
+-- drop procedure PlaceOrderFromCart
+
+-- -- 6. PLACE ORDER FROM CART
+-- CREATE OR REPLACE PROCEDURE PlaceOrderFromCart(
+--     p_user_id INT,
+--     p_address_id INT,
+--     p_payment_method TEXT,
+--     p_transaction_id TEXT
+-- )
+-- LANGUAGE plpgsql AS $$
+-- DECLARE
+--     v_total NUMERIC := 0;
+--     v_order_id INT;
+--     v_restaurant_id INT;
+--     v_item RECORD; -- Declare RECORD variable for the loop
+-- BEGIN
+--     -- Ensure all items are from the same restaurant
+--     SELECT DISTINCT m.RestaurantID INTO v_restaurant_id
+--     FROM Cart c
+--     JOIN MenuItems m ON c.ItemID = m.ItemID
+--     WHERE c.UserID = p_user_id;
+
+--     IF v_restaurant_id IS NULL THEN
+--         RAISE EXCEPTION 'Cart is empty.';
+--     ELSIF EXISTS (
+--         SELECT 1 FROM (
+--             SELECT DISTINCT m.RestaurantID
+--             FROM Cart c
+--             JOIN MenuItems m ON c.ItemID = m.ItemID
+--             WHERE c.UserID = p_user_id
+--         ) t HAVING COUNT(*) > 1
+--     ) THEN
+--         RAISE EXCEPTION 'Cart contains items from multiple restaurants.';
+--     END IF;
+
+--     -- Create the order
+--     INSERT INTO Orders (UserID, RestaurantID, OrderDate, Status, TotalAmount, AddressID)
+--     VALUES (p_user_id, v_restaurant_id, NOW(), 'Pending', 0, p_address_id)
+--     RETURNING OrderID INTO v_order_id;
+
+--     -- Add order details
+--     FOR v_item IN
+--         SELECT ItemID, Quantity, (Price * Quantity) AS Subtotal
+--         FROM Cart c
+--         JOIN MenuItems m ON c.ItemID = m.ItemID
+--         WHERE c.UserID = p_user_id
+--     LOOP
+--         INSERT INTO OrderDetails (OrderID, ItemID, Quantity, Subtotal)
+--         VALUES (v_order_id, v_item.ItemID, v_item.Quantity, v_item.Subtotal);
+--         v_total := v_total + v_item.Subtotal;
+--     END LOOP;
+
+--     -- Update total in Orders
+--     UPDATE Orders SET TotalAmount = v_total WHERE OrderID = v_order_id;
+
+--     -- Add payment
+--     INSERT INTO Payments (OrderID, UserID, Amount, PaymentMethod, Status, TransactionID, Timestamp)
+--     VALUES (v_order_id, p_user_id, v_total, p_payment_method, 'Success', p_transaction_id, NOW());
+
+--     -- Clear cart
+--     DELETE FROM Cart WHERE UserID = p_user_id;
+-- END;
+-- $$;
+
+-- -- Add items to cart
+-- CALL AddToCart(1, 3, 2);
+-- CALL AddToCart(1, 3, 1);  -- Adds more of same item
+
+-- -- View cart
+-- SELECT * FROM UserCartView WHERE UserID = 1;
+
+-- -- Place the order
+-- CALL PlaceOrderFromCart(1, 2, 'UPI', 'TXN382930');
+
+select * from orderdetails;
+
+
+
+
+CREATE OR REPLACE FUNCTION PlaceOrder(
+    p_userid INT,
+    p_restaurantid INT,
+    p_addressid INT,
+    p_items JSON,
+    p_paymentmethod VARCHAR,
+    p_transactionid VARCHAR
+)
+RETURNS INT AS $$
+DECLARE
+    v_orderid INT;
+    v_item JSON;
+    v_itemid INT;
+    v_quantity INT;
+    v_price DECIMAL;
+    v_subtotal DECIMAL;
+    v_total DECIMAL := 0;
+BEGIN
+    -- Step 1: Insert the empty order (TotalAmount will be updated later)
+    INSERT INTO Orders(UserID, RestaurantID, OrderDate, Status, TotalAmount, AddressID)
+    VALUES (p_userid, p_restaurantid, NOW(), 'Pending', 0, p_addressid)
+    RETURNING OrderID INTO v_orderid;
+
+    -- Step 2: Loop through items and add to OrderDetails
+    FOR v_item IN SELECT * FROM json_array_elements(p_items)
+    LOOP
+        v_itemid := (v_item->>'itemid')::INT;
+        v_quantity := (v_item->>'quantity')::INT;
+
+        -- Get price from MenuItems
+        SELECT Price INTO v_price FROM MenuItems WHERE ItemID = v_itemid;
+
+        -- Calculate subtotal
+        v_subtotal := v_price *(v_quantity::DECIMAL);
+        v_total := v_total + v_subtotal;
+
+		
+		RAISE NOTICE 'ItemID: %, Quantity: %, Price: %, Subtotal: %', v_itemid, v_quantity, v_price, v_subtotal;
+
+
+        -- Insert into OrderDetails
+        INSERT INTO OrderDetails(OrderID, ItemID, Quantity, Subtotal)
+        VALUES (v_orderid, v_itemid, v_quantity, v_subtotal);
+    END LOOP;
+
+    -- Step 3: Update total in Orders
+    UPDATE Orders
+    SET TotalAmount = v_total
+    WHERE OrderID = v_orderid;
+
+    -- Step 4: Insert into Payments
+    INSERT INTO Payments(OrderID, UserID, Amount, PaymentMethod, Status, TransactionID, Timestamp)
+    VALUES (v_orderid, p_userid, v_total, p_paymentmethod, 'Pending', p_transactionid, NOW());
+
+	RETURN v_orderid;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+SELECT PlaceOrder(
+    1,  -- UserID
+    1,  -- RestaurantID
+    1,  -- AddressID
+    '[
+        {"itemid": 1, "quantity": 1},
+        {"itemid": 4, "quantity": 3}
+     ]',
+    'Credit Card',
+    'TXN-123468'
+);
+
+select * from deliveryperson;
+
+alter table deliveryperson add column availability bool default True;
+
+
+
+CREATE OR REPLACE PROCEDURE AssignDeliveryPerson(p_orderid INT)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_deliverypersonid INT;
+BEGIN
+    -- Step 1: Find an available delivery person
+    SELECT DeliveryPersonID INTO v_deliverypersonid
+    FROM DeliveryPerson
+    WHERE Availability = TRUE
+    LIMIT 1;
+
+    -- Step 2: If none found, raise an exception
+    IF v_deliverypersonid IS NULL THEN
+        RAISE EXCEPTION 'No available delivery person at the moment.';
+    END IF;
+
+    -- Step 3: Insert into Delivery table
+    INSERT INTO Delivery(OrderID, DeliveryPersonID, EstimatedTime, Status, DeliveryFee)
+    VALUES (p_orderid, v_deliverypersonid, NOW() + INTERVAL '30 minutes', 'Assigned', 30.00);
+
+    -- Step 4: Mark delivery person as unavailable
+    UPDATE DeliveryPerson
+    SET Availability = FALSE
+    WHERE DeliveryPersonID = v_deliverypersonid;
+END;
+$$;
+
+CALL AssignDeliveryPerson(20);
+
+select * from getrestaurantmenu('Tandoori Nights');
+
+
+CREATE OR REPLACE FUNCTION GetRestaurantMenu(restaurant_name TEXT)
+RETURNS TABLE (
+    itemid INT,
+    restaurantid INT,
+    itemname TEXT,
+    price NUMERIC,
+    category TEXT,
+	availability bool
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT mi.itemid, r.restaurantid, mi.name::TEXT, mi.price, mi.category::TEXT, mi.availability
+    FROM menuitems mi
+    JOIN restaurants r ON mi.restaurantid = r.restaurantid
+    WHERE r.name = restaurant_name;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT proname, pg_get_function_arguments(p.oid)
+FROM pg_proc p
+JOIN pg_namespace n ON p.pronamespace = n.oid
+WHERE proname ILIKE 'placeorder';
+
+drop function PlaceOrder;
+
+DROP FUNCTION IF EXISTS PlaceOrder(
+    integer, integer, integer, json, numeric, varchar, varchar
+);
+
+SELECT * FROM Orders WHERE OrderID = 36;
+
+set role restaurant_admin_role;
+set app.restaurantid = 2;
+
+
+
+
+select * from orders;
+
+-- Create or replace function to add a new restaurant
+CREATE OR REPLACE FUNCTION AddRestaurant(
+	p_id INT,
+    p_name VARCHAR,
+    p_location VARCHAR,
+    p_contact VARCHAR,
+    p_rating DECIMAL
+)
+RETURNS VOID AS $$
+BEGIN
+    -- Insert the new restaurant into the Restaurants table
+    INSERT INTO Restaurants (restaurantid ,Name, Location, Contact, Rating)
+    VALUES (p_id,p_name, p_location, p_contact, p_rating);
+    
+    RAISE NOTICE 'Restaurant % added successfully.', p_name;
+END;
+$$ LANGUAGE plpgsql;
+drop function addrestaurant;
+select * from restaurants;
+set role admin_role;
+-- Call the AddRestaurant function to add a new restaurant
+SELECT AddRestaurant(9,
+    'The Spice House',                  -- Restaurant Name
+    '123 Flavor Street, Food City',      -- Restaurant Location
+    '+1234567890',                      -- Restaurant Contact
+    4.5                                  -- Restaurant Rating
+);
+set role postgres;
+GRANT INSERT ON Restaurants TO admin_role;
+GRANT EXECUTE ON FUNCTION AddRestaurant(INT,VARCHAR, VARCHAR, VARCHAR, DECIMAL) TO admin_role;
+-- Set the role to restaurant_admin_role
+SET ROLE restaurant_admin_role;
+
+-- Delete a restaurant by its RestaurantID
+DELETE FROM Restaurants
+WHERE RestaurantID = 9;  -- Replace with the actual RestaurantID to delete
+
+
+
+
+
+drop function placeorder(p_userid integer, p_restaurantid integer, p_addressid integer, p_items json, p_paymentmethod character varying, p_transactionid character varying);

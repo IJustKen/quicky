@@ -1,0 +1,79 @@
+-- query to look at menuitems owned by restaurant, role - restaurant_admin_role --
+
+set role restaurant_admin_role;
+set app.restaurantid = 2;
+select * from menuitems;
+
+-- query to get restaurants by cuisine, role - customere_role--
+
+set role customer_role;
+select * from getrestaurantsbycuisine('South Indian');
+
+
+-- query to get items in a restaurant, role - customere_role--
+
+set role customer_role;
+select * from getrestaurantmenu('South Masala');
+
+-- query to assign a delivery person by the restaurant, role - restaurant_admin --
+
+set role restaurant_admin_role;
+call assigndeliveryperson(50);
+
+--query to check delivery status, role - delivery_role --
+
+set role delivery_role;
+select * from getdeliverystatus(50);
+
+--query to add a restaurant by the admin role--
+
+select * from restaurants;
+set role admin_role;
+-- Call the AddRestaurant function to add a new restaurant
+SELECT AddRestaurant(9,             --restaurantid
+    'The Spice House',                  -- Restaurant Name
+    '123 Flavor Street, Food City',      -- Restaurant Location
+    '+1234567890',                      -- Restaurant Contact
+    4.5                                  -- Restaurant Rating
+);
+
+
+--debug--
+select * from deliveryperson;
+
+
+--placing order populates orders payments and orderdetails for customer role--
+set role customer_role;
+SELECT PlaceOrder(
+    3,  -- UserID
+    1,  -- RestaurantID
+    3,  -- AddressID
+    '[{"itemid": 2, "quantity": 4}, {"itemid": 2, "quantity": 4}]'::json,  -- Items (JSON array)
+    'UPI',  -- Payment Method
+    'TXN-148426'  -- Transaction ID
+);
+set role postgres;
+
+select * from orders;
+
+
+--views--
+SELECT * FROM RestaurantMenus;
+
+SELECT * FROM CustomerOrders;
+
+SELECT * FROM DeliveryStatusView;
+
+SELECT * FROM PendingDeliveries;
+
+SELECT * FROM UserOrderSummary;
+
+--indices--
+CREATE INDEX idx_menuitems_category ON MenuItems(Category); --restaurant by cuisine--
+
+CREATE INDEX idx_restaurants_name ON Restaurants(Name);--get restaurant menu by restaiurant name--
+
+CREATE INDEX idx_orders_status ON Orders(Status);--in the view pending deliveries--
+
+CREATE INDEX idx_delivery_person ON Delivery(DeliveryPersonID);
+--when we look up delivery people in the assign delivery person function--
